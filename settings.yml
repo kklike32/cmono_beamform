@@ -1,0 +1,20 @@
+###########################################################
+# Settings for beamformer controller and SoundSynthesizer #
+###########################################################
+
+SAMPLING_FREQUENCY: 48000
+CHANNELS : 2
+ANGLE_RESOLUTION: 500
+MIC_SPACING: 0.0167
+SPEED_OF_SOUND: 343
+POLAR: False
+
+
+MATLAB_ROOT: 'C:/Users/amang/Desktop/Projects/MLab/cmono_repo/cmono_repo/beamforming/src/soundprocessing/'
+
+ROUTER_IP : "128.120.24.167"
+ROUTER_PORT : 2888
+
+PUPILCORE_CONNECTED: False
+
+
