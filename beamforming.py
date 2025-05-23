@@ -228,7 +228,7 @@ def compute_mvdr_weights(steering_vector, R):
 freq = 2000  # 1 kHz test signal
 c = 343.0    # Speed of sound
 M = 8        # Number of microphones
-d = 0.04     # 4 cm spacing
+d = 0.02     # 4 cm spacing
 fs = 44100   # Sampling rate
 duration = 1.0  # Signal duration
 
@@ -249,7 +249,7 @@ for m in range(M):
     signal[m] = np.roll(signal[m], delay_samples[m])
 
 # Add noise
-noise = np.random.normal(0, 0.1, signal.shape)
+noise = np.random.normal(0, 1, signal.shape)
 signal += noise
 
 # Test different angles
