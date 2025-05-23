@@ -4,26 +4,65 @@ from scipy.io import wavfile
 from scipy.signal import stft, istft
 import soundfile as sf
 
-def make_mono_audio(frequency: int, write_file: bool = False, duration: float = 1.0, sampling_rate: int = 44100):
+def calculate_snr(signal, noise):
     """
-    Generate a mono sine wave audio signal.
+    Calculate Signal-to-Noise Ratio in dB.
+    
+    :param signal: Signal array
+    :param noise: Noise array
+    :return: SNR in dB
+    """
+    signal_power = np.mean(signal ** 2)
+    noise_power = np.mean(noise ** 2)
+    snr = 10 * np.log10(signal_power / noise_power)
+    return snr
+
+def calculate_beamformer_snr(input_snr, beamformed_signal, original_signal, noise):
+    """
+    Calculate the SNR improvement from beamforming.
+    
+    :param input_snr: Input SNR in dB
+    :param beamformed_signal: Beamformed output signal
+    :param original_signal: Original signal
+    :param noise: Noise signal
+    :return: Output SNR and SNR improvement in dB
+    """
+    # Calculate output SNR
+    signal_power = np.mean(beamformed_signal ** 2)
+    noise_power = np.mean(noise ** 2)
+    output_snr = 10 * np.log10(signal_power / noise_power)
+    
+    # Calculate SNR improvement
+    snr_improvement = output_snr - input_snr
+    
+    return output_snr, snr_improvement
+
+def make_mono_audio(frequency: int, write_file: bool = False, duration: float = 1.0, sampling_rate: int = 44100, snr_db: float = 0):
+    """
+    Generate a mono sine wave audio signal with controlled SNR.
 
     :param frequency: Frequency of the sine wave in Hz.
     :param write_file: If True, saves the generated audio as a WAV file.
     :param duration: Duration of the generated sine wave in seconds (default: 1.0s).
     :param sampling_rate: Sampling rate in Hz (default: 44100 Hz).
-    :return: NumPy array containing the generated sine wave.
+    :param snr_db: Desired SNR in dB (default: 0 dB).
+    :return: Tuple of (signal, noise, clean_signal)
     """
-    noise = np.random.normal(0, 0.1, int(sampling_rate * duration))
-    
     t = np.linspace(0, duration, int(sampling_rate * duration), endpoint=False)
-    result = np.sin(2 * np.pi * frequency * t)
-    result += noise
+    clean_signal = np.sin(2 * np.pi * frequency * t)
+    
+    # Generate noise with controlled power
+    signal_power = np.mean(clean_signal ** 2)
+    noise_power = signal_power / (10 ** (snr_db / 10))
+    noise = np.random.normal(0, np.sqrt(noise_power), len(clean_signal))
+    
+    # Combine signal and noise
+    result = clean_signal + noise
 
     if write_file:
         write("updated_sin1k.wav", sampling_rate, result.astype(np.float32))
 
-    return result
+    return result, noise, clean_signal
 
 def create_delay_vector(speed_of_sound, angle_rad, num_mics, mic_separation):
     """
@@ -92,146 +131,148 @@ def delay_across_channels_py_freq(mono_audio, steering_angle, num_mics, mic_sepa
 
     return result
 
-def create_steering_vector(freqs, mic_positions, angle_deg, c=343.0):
+def create_steering_vector(freq, angle_deg, mic_positions, c=343.0):
     """
-    Create a steering vector for the given frequency bins and microphone positions.
+    Create a steering vector for a single frequency.
     
-    :param freqs: Array of frequency bins
-    :param mic_positions: Array of microphone positions
+    :param freq: Frequency in Hz
     :param angle_deg: Steering angle in degrees
+    :param mic_positions: Array of microphone positions
     :param c: Speed of sound in m/s
-    :return: Steering vector of shape (F, M) where F is number of frequency bins and M is number of microphones
+    :return: Steering vector
     """
     angle_rad = np.deg2rad(angle_deg)
-    return np.exp(-1j * 2 * np.pi * freqs[:, None] * mic_positions[None, :] * np.cos(angle_rad) / c)
+    wavelength = c / freq
+    return np.exp(-1j * 2 * np.pi * mic_positions * np.sin(angle_rad) / wavelength)
 
-def estimate_noise_covariance(X, noise_frames=10):
+def mvdr_beamformer(signal, target_angle, mic_positions, freq, c=343.0):
     """
-    Estimate the noise covariance matrix from the first few frames of the signal.
+    Simple MVDR beamformer for a single frequency.
+    
+    :param signal: Input signal array (M x T)
+    :param target_angle: Target angle in degrees
+    :param mic_positions: Array of microphone positions
+    :param freq: Signal frequency in Hz
+    :param c: Speed of sound in m/s
+    :return: Beamformed signal
+    """
+    M = len(mic_positions)
+    
+    # Create steering vector
+    a = create_steering_vector(freq, target_angle, mic_positions, c)
+    
+    # Estimate covariance matrix
+    R = np.zeros((M, M), dtype=np.complex128)
+    for t in range(signal.shape[1]):
+        x = signal[:, t:t+1]
+        R += x @ x.conj().T
+    R /= signal.shape[1]
+    
+    # Add diagonal loading
+    R += 1e-6 * np.trace(R) * np.eye(M) / M
+    
+    # Compute MVDR weights
+    R_inv = np.linalg.inv(R)
+    w = R_inv @ a
+    w /= (a.conj().T @ R_inv @ a)
+    
+    # Apply weights
+    return w.conj().T @ signal
+
+def estimate_covariance_matrix(X, num_snapshots=50):
+    """
+    Estimate the spatial covariance matrix using multiple snapshots.
     
     :param X: STFT of the signal, shape (M, F, T)
-    :param noise_frames: Number of frames to use for noise estimation
-    :return: Noise covariance matrix of shape (F, M, M)
+    :param num_snapshots: Number of snapshots to use
+    :return: Covariance matrix of shape (F, M, M)
     """
-    X_noise = X[:, :, :noise_frames]
-    Rn = np.einsum("mft,nft->fmn", X_noise, np.conj(X_noise)) / noise_frames
-    # Add small regularization
-    for k in range(Rn.shape[0]):
-        Rn[k] += 1e-6 * np.trace(Rn[k]) * np.eye(Rn.shape[1]) / Rn.shape[1]
-    return Rn
+    M, F, T = X.shape
+    R = np.zeros((F, M, M), dtype=np.complex128)
+    
+    # Use multiple snapshots for better estimation
+    for f in range(F):
+        # Select random snapshots
+        snapshots = X[:, f, :num_snapshots]
+        # Compute covariance matrix
+        R[f] = np.mean(snapshots @ snapshots.conj().T, axis=1)
+        
+        # Add diagonal loading for robustness
+        delta = 1e-3 * np.trace(R[f]) / M
+        R[f] += delta * np.eye(M)
+    
+    return R
 
-def compute_mvdr_weights(steering_vector, Rn, reg=1e-6):
+def compute_mvdr_weights(steering_vector, R):
     """
-    Compute MVDR beamforming weights.
+    Compute MVDR beamforming weights using proper matrix inversion.
     
     :param steering_vector: Steering vector of shape (F, M)
-    :param Rn: Noise covariance matrix of shape (F, M, M)
-    :param reg: Regularization parameter
+    :param R: Covariance matrix of shape (F, M, M)
     :return: Beamforming weights of shape (F, M)
     """
+    F, M = steering_vector.shape
     w = np.empty_like(steering_vector, dtype=np.complex128)
-    for k in range(len(steering_vector)):
-        R_inv_a = np.linalg.solve(Rn[k] + reg * np.eye(Rn.shape[1]), steering_vector[k])
-        denom = np.conj(steering_vector[k]).T @ R_inv_a
-        w[k] = R_inv_a / denom
+    
+    for f in range(F):
+        # Compute inverse of covariance matrix
+        R_inv = np.linalg.inv(R[f])
+        # Compute MVDR weights
+        w[f] = R_inv @ steering_vector[f]
+        # Normalize
+        w[f] /= (steering_vector[f].conj().T @ R_inv @ steering_vector[f])
+    
     return w
 
 # ------------------------ Array & signal parameters ------------------------
-freq = 12000  # Frequency of the test signal
-c = 343.0     # Speed of sound (m/s)
-M = 8         # Number of microphones
-d = 0.01      # Microphone spacing (m)
-win_len = 1024
-hop = win_len // 2
-window = "hann"
-fs = 44100
+freq = 2000  # 1 kHz test signal
+c = 343.0    # Speed of sound
+M = 8        # Number of microphones
+d = 0.04     # 4 cm spacing
+fs = 44100   # Sampling rate
+duration = 1.0  # Signal duration
 
-# Create microphone positions
+# Create microphone array
 mic_positions = np.arange(M) * d
 
 # Generate test signal
-mono_audio = make_mono_audio(freq, False, 5, fs)
+t = np.linspace(0, duration, int(fs * duration))
+signal = np.sin(2 * np.pi * freq * t)
+signal = signal.reshape(1, -1)  # Single channel
+signal = np.tile(signal, (M, 1))  # Replicate across microphones
 
-# Initialize arrays for polar plot
-angleArr = []
-logOutputArr = []
-angleRadArr = []
+# Add some phase delay to simulate direction
+target_angle = 30  # degrees
+delay = mic_positions * np.sin(np.deg2rad(target_angle)) / c
+delay_samples = (delay * fs).astype(int)
+for m in range(M):
+    signal[m] = np.roll(signal[m], delay_samples[m])
 
-maxAngle, maxVal = 0, -300
-N = 360  # Number of angles to test
+# Add noise
+noise = np.random.normal(0, 0.1, signal.shape)
+signal += noise
 
-# Perform beamforming for each angle
-for a in range(N):
-    angle = 360 * a / (N - 1)
-    angleRad = angle * (np.pi/180)
-    
-    # Create delayed signals for each microphone
-    audio = delay_across_channels_py_freq(mono_audio, angle, M, d, fs, c)
-    
-    # Compute STFT
-    F, T, X = stft(audio.T, fs=fs, window=window, nperseg=win_len, noverlap=hop, axis=-1)
-    
-    # Get frequency bins
-    freqs = np.fft.rfftfreq(win_len, 1/fs)
-    
-    # Create steering vector
-    steering_vector = create_steering_vector(freqs, mic_positions, angle)
-    
-    # Estimate noise covariance
-    Rn = estimate_noise_covariance(X)
-    
-    # Compute MVDR weights
-    w = compute_mvdr_weights(steering_vector, Rn)
-    
-    # Apply beamforming
-    X = X.transpose(1, 0, 2)  # Reshape to (F, M, T)
-    Y = np.sum(np.conj(w)[:, :, None] * X, axis=1)  # Beamformed output (F, T)
-    
-    # Reconstruct time domain signal
-    _, y_time = istft(Y, fs=fs, window=window, nperseg=win_len, noverlap=hop)
-    
-    # Compute output power
-    output_power = np.max(np.abs(y_time))
-    if maxVal < output_power:
-        maxVal = output_power
-        maxAngle = angle
-    
-    # Convert to dB
-    logOutput = 20 * np.log10(output_power)
-    
-    # Store results
-    angleRadArr.append(angleRad)
-    angleArr.append(angle)
-    logOutputArr.append(logOutput)
+# Test different angles
+angles = np.linspace(0, 360, 360)
+responses = []
 
-print(f"Maximum response at angle {maxAngle}° with value {maxVal}")
+for angle in angles:
+    # Apply MVDR beamformer
+    output = mvdr_beamformer(signal, angle, mic_positions, freq)
+    # Calculate response power
+    response = np.mean(np.abs(output) ** 2)
+    responses.append(20 * np.log10(response))
 
-# Create polar plot
-plt.figure(figsize=(10, 8))
-ax = plt.subplot(111, projection='polar')
-ax.plot(angleRadArr, logOutputArr, 'b-', linewidth=2)
-
-# Set the title and labels
-plt.title('Beamformer Response Pattern', pad=20, size=14)
-ax.set_theta_zero_location('N')  # Set 0 degrees to North
-ax.set_theta_direction(-1)  # Set clockwise direction
-
-# Add grid and improve its appearance
-ax.grid(True, linestyle='--', alpha=0.7)
-
-# Set the radial axis label
-ax.set_ylabel('Magnitude (dB)', labelpad=20)
-
-# Set the angle labels
-ax.set_thetagrids(np.arange(0, 360, 45))
-
-# Set the radial limits based on the data
-rmin = min(logOutputArr)
-rmax = max(logOutputArr)
-ax.set_ylim(rmin - 5, rmax + 5)
-
-# Add a legend
-plt.legend(['Beamformer Response'], loc='upper right')
-
-plt.tight_layout()
+# Plot results
+plt.figure(figsize=(10, 6))
+plt.polar(np.deg2rad(angles), responses)
+plt.title('MVDR Beamformer Response Pattern')
+plt.grid(True)
 plt.show()
+
+# Print target angle and maximum response
+max_idx = np.argmax(responses)
+print(f"Target angle: {target_angle}°")
+print(f"Maximum response at: {angles[max_idx]:.1f}°")
+print(f"Response at target angle: {responses[int(target_angle)]:.1f} dB")
+print(f"Maximum response: {np.max(responses):.1f} dB")
