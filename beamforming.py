@@ -291,6 +291,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
 # ------------------------------------------------------------------
 # 1.  Steering-vector utilities (unchanged)
@@ -329,15 +330,13 @@ fs, dur = 44_100, 1.0          # sampling rate and duration
 c, M, d = 343.0, 8, 0.02       # 8 mics, 2 cm spacing
 mic_pos = np.arange(M) * d
 
-# Test frequencies (in Hz)
-freqs = [1000, 2000, 4000]  # 1 kHz, 2 kHz, 4 kHz
+# Requested frequencies (in Hz)
+freqs = [100, 890, 1680, 2469, 3260, 4050, 4840, 5630, 6420, 7210, 8000]
+colors = cm.rainbow(np.linspace(0, 1, len(freqs)))
 
-# Create figure for Cartesian plot
 plt.figure(figsize=(12, 8))
 
-# Test each frequency
-for f0 in freqs:
-    # Generate clean tone
+for idx, (f0, color) in enumerate(zip(freqs, colors)):
     t = np.linspace(0, dur, int(fs*dur), endpoint=False)
     x0 = np.sin(2*np.pi*f0*t)
     noise = 0.5*np.random.randn(*x0.shape)
@@ -346,8 +345,7 @@ for f0 in freqs:
     # apply *true* delays for a real source at 0° (broadside)
     θ_true = 0
     delay_sec = mic_pos * np.sin(np.deg2rad(θ_true)) / c
-    X = np.vstack([np.roll(x_clean, int(round(τ*fs)))
-                   for τ in delay_sec])
+    X = np.vstack([np.roll(x_clean, int(round(τ*fs))) for τ in delay_sec])
 
     # Design MVDR weights for broadside
     R = estimate_covariance(X)
@@ -357,25 +355,20 @@ for f0 in freqs:
     # Evaluate beampattern
     angles = np.arange(-90, 91)  # -90° to +90°
     pattern = []
-
     for θ in angles:
         a_scan = create_steering_vector(f0, θ, mic_pos)
         pattern.append(20*np.log10(np.abs(w.conj().T @ a_scan)))
-
     pattern = np.array(pattern)
     pattern = pattern - pattern.max()    # normalize so main-lobe is 0 dB
 
-    # Plot in Cartesian coordinates
-    plt.plot(angles, pattern, label=f'{f0/1000:.1f} kHz')
+    plt.plot(angles, pattern, color=color, label=f'{f0}')
 
 plt.title('MVDR Beam Pattern (Broadside Steering)')
 plt.xlabel('Angle (degrees)')
 plt.ylabel('Normalized Response (dB)')
 plt.grid(True)
-plt.legend()
+plt.legend(title='Frequency (Hz)', bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.ylim(-40, 3)
 plt.xlim(-90, 90)
+plt.tight_layout(rect=[0, 0, 0.85, 1])
 plt.show()
-
-print(f"Desired look-direction: {θ_true}°")
-print(f"Peak beam response @  : {angles[np.argmax(pattern)]:.1f}°")
