@@ -30,7 +30,7 @@ fs, dur     = 44_100, 1.0         # sample rate, seconds
 c, M, d     = 343.0, 8, 0.02      # 8 mics, 2 cm spacing
 mic_pos     = np.arange(M) * d
 theta_src   = 45                   # broadside
-theta_look = 45 #stress test #1
+theta_look = 20 #stress test #1
 
 noise_sigma = 0.5 # adjust for SNR
 
